@@ -10,11 +10,11 @@ from collections import defaultdict
 
 def consolidate_list2( lst ):
     rst = defaultdict(int)
-    for (k,v) in lst: 
+    for (k,v) in lst:
         rst[k] += v
     return rst
 
-def consolidate_list3( lst ):
+def consolidate_list3( lst ): 
     ls1 = defaultdict(int)
     ls2 = defaultdict(int)
     for (k,m,v) in lst:
