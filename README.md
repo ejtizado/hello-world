@@ -1,2 +1,2 @@
-# hello-world
-My new project testing GitHub
+# pcs_addons
+Ficheros para poder trabajar en cualquier sitio
