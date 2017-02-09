@@ -1,130 +1,120 @@
+#!/bin/bash/env python
 
-import os
-os.chdir("/home/jorge/mounts/usb1/Research/proyectos/Sweden/TRASE/PCS/PYTHON_PACKAGES/")
+from collections import defaultdict
 
-import sys
-sys.path += ['/home/jorge/mounts/usb1/Research/proyectos/Sweden/TRASE/PCS/PYTHON_PACKAGES/']
-
-# -----
-from collections import defaultdict, deque
-
-def consolidate_list2( lst ):
-    rst = defaultdict(int)
-    for (k,v) in lst: 
-        rst[k] += v
-    return rst
-
-def consolidate_list3( lst ):
-    ls1 = defaultdict(int)
-    ls2 = defaultdict(int)
-    for (k,m,v) in lst:
-        ls1[k] += v
-        ls2[m] += v
-    return ls1,ls2
+def consolidate_last( lst ):
+    n = len(lst[0]) - 1
+    rst = [ defaultdict(float) for i in range(n) ]
+    for item in lst:
+        for i in range(n):
+            rst[i][ item[i] ] += item[n]
+    return rst if n > 1 else rst[0]
 
 # -----
 from pcs import *
 
 YEAR = 2015
 COUNTRY = 'BRAZIL'
-
-# limit is set for testing purposes, to load full datasets, set to None
 limit = None
+optim = "glpk"
 
-# 1. --- Exportation from logistic hub and from state
-print "Extracting HUBS data..."
-data = load_supply_chain( get_ref_id('COP before indicators'), limit=limit )
-# remove municipality 2 from path
-data.chop(3)
-# remove biome from path
-data.chop(0)
-# remove others
-data.chop(2)
-data.chop(2)
-data.chop(2)
-data.consolidate()
-# reinitialize object to update __repr__
-data = SupplyChain(data.flows)
-# ---
-data = [ (flow.path[1].main_id, flow.path[0].main_id, flow.raw_vol) for flow in data.flows if flow.path[1].name[:7] != 'UNKNOWN' ]
-chain, hstate = consolidate_list3(data)
-cols_id = sorted(chain.keys())
+filedat = "../../lp_2017/lp_muns_hubs_v5.dat"
 
-# 2. --- Production from municipality source and from state
+# ---------------------------------------------------------
+# --- Exportation from logistic hub and from state
+print "Extracting CHAIN data..."
+chain = load_supply_chain( get_ref_id('COP before indicators'), limit=limit )
+# >>>
+hubs = defaultdict(float)
+st_hubs = defaultdict(float)
+for flow in chain.flows:
+    st_hubs[ flow.path[1].main_id ] += flow.raw_vol
+    if flow.path[2].name[:7] != 'UNKNOWN':
+        hubs[ flow.path[2].main_id ] += flow.raw_vol
+
+# ---------------------------------------------------------
+# --- Production from municipality source and from state
 print "Extracting MUNIC data..."
-data = get_data( get_ref_id('BRAZIL MUNICIPAL SOY PRODUCTION 2015'), limit=limit )
-# ---
-fstate = [ (flow.path[1].main_id, flow.raw_vol) for flow in data.flows ]
-fstate = consolidate_list2(fstate)
+munic = get_data( get_ref_id('BRAZIL MUNICIPAL SOY PRODUCTION 2015'), limit=limit )
+# >>>
+st_muns = defaultdict(float)
+for flow in munic.flows:
+    st_muns[ flow.path[1].main_id ] += flow.raw_vol
 
-ratio = {}
-for mid in fstate.keys():
-    if mid not in hstate: hstate[mid] = 0
-    ratio[mid] = hstate[mid] / fstate[mid]
+rat = {}
+for idm in st_muns:
+    rat[idm] = st_hubs[idm] / st_muns[idm]
+    if rat[idm] > 1.0: rat[idm] = 1.0
 
-munic = [ (flow.path[0].main_id, flow.raw_vol * ratio[flow.path[1].main_id]) for flow in data.flows ]
-munic = consolidate_list2(munic)
-rows_id = sorted(munic.keys())
+muns = defaultdict(float)
+for flow in munic.flows:
+    muns[ flow.path[0].main_id ] += flow.raw_vol * rat[flow.path[1].main_id]
 
-# 3. --- Cost table
+# ---------------------------------------------------------
+# --- Cost list
 print "Extracting COST data..."
-nation_id = get_country_id(COUNTRY)
-cost = get_cost_list(nation_id, rows_id, cols_id, YEAR, mode='list') # posible order by en SQL, to optim in python
+cost = get_cost_table( get_country_id(COUNTRY), muns.keys(), hubs.keys(), YEAR, mode='list' )
 
-# check the munic that are hubs and they are cost value
-munic_ok = []
-for (idm,idh,c) in cost:
-    if idm == idh: munic_ok.append(idm)
+# --- Check
+hsum = 0
+for i in hubs: hsum += hubs[i]
+msum = 0
+for i in muns: msum += muns[i]
 
-cost = deque(cost)
-for i in set(rows_id).difference(munic_ok):
-    cost.appendleft( (i,i,0) )
-   
+print "Total in logistic hubs : %d tons\n" % hsum
+print "Total in municipalities: %d tons\n" % msum
+print "-----------------------: %d tons\n" % (hsum - msum)
+if hsum > msum:
+    print "Flow no valid!"
+    stop
 
-# 4. --- Make optimization
-cost.sort( key=lambda x: x[2])
-n_hubs = len(chain)
-for (idm,idh,val) in cost:
-    buy = chain[idh]
-    if buy == 0: continue
-    sell = munic[idm]
-    trade = sell if sell < buy else buy
-    print (idh,idm,trade)
-    munic[idm] -= trade
-    chain[idh] -= trade
-    if chain[idh] == 0:
-        n_hubs -= 1
-        if n_hubs == 0: break
+# ---------------------------------------------------------
+# --- Optimization
+if optim == "glpk":
+    # GLPK optimization
+    nodes = max( max(muns.keys()), max(hubs.keys()) )
+    print "Writing DAT file ... "
+    fout = open(filedat, 'w')
+    fout.write("data;\n")
+    fout.write("# with ratio = all_hubs / production\n")
+    fout.write("# with ratio limited to 1.0\n\n")
+    fout.write("param n := " + str(nodes) + ";\n\n")
+    fout.write("param : muns : src :=\n")
+    for idm in muns: fout.write("  " + str(idm) + " " + str(int(muns[idm]+0.5)) + "\n")
+    fout.write("  ;\n\nparam : hubs : dst :=\n")
+    for idh in hubs: fout.write("  " + str(idh) + " " + str(int(hubs[idh]+0.5)) + "\n")
+    fout.write("  ;\n\nparam : routes : cost :=\n")
+    for (idm,idh,value) in cost: fout.write("  " + str(idm) + " " + str(idh) + " " + str(int(value+0.5)) + "\n")
+    fout.write("  ;\n\nend;\n")
+    fout.close()
 
+    # os.sys("/PATH/TO/glpsol --simplex -m /PATH/TO/lp_muns_hubs.mod -d lp_muns_hubs.dat")
+else:
+    # PYTHON optimization
+    chk = [idh for (idm, idh, val) in cost if idm == idh ]
+    for idh in hubs:
+        if idh not in chk and idh in muns:
+            cost.append( (idh,idh,0.0) )
 
-print "Remaining hubs...
-for k in chain:
-    if chain[k] > 0: print k
-print "---"
-        
+    best = defaultdict( lambda : defaultdict(float) )
+    cost.sort( key=lambda x: x[2])
+    n_hubs = len(hubs)
+    for (idm, idh, val) in cost:
+        buy = hubs[idh]
+        sell = muns[idm]
+        if buy == 0 or sell == 0: continue
+        trade = min(sell, buy)
+        best[idm][idh] += trade
+        muns[idm] -= trade
+        hubs[idh] -= trade
+        if hubs[idh] == 0:
+            n_hubs -= 1
+            if n_hubs == 0: break
 
-#==============================================================================
-# for (idm,idh,val) in cost:
-#     buy = chain[idh]
-#      if buy <= 0: continue
-#      sell = munic[idm]
-#      if sell >= buy:
-#          print (idh,idh,buy)
-#          chain[idh] = 0
-#          munic[idm] -= buy
-#          n_hubs -= 1
-#          if n_hubs == 0: break
-#      else:
-#          print (idh,idm,sell)
-#          chain[idh] -= sell
-#          munic[idm] = 0
-#==============================================================================
+fout = open("PYTHON_MUNS_HUBS.txt", 'w')
+fout.write("MUN_ID,HUB_ID,RAW_VOL\n")
+for idm in best:
+    for idh in best[idm]:
+        fout.write(str(idm) + ',' + str(idh) + ',' + str(int(best[idm][idh]+0.5)) + "\n")
 
-            
-            
-        
-        
-    
-
-
-
+fout.close()
